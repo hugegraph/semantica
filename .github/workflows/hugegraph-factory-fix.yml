@@ -1,0 +1,227 @@
+name: Fix HugeGraph backend factory integration
+
+on:
+  push:
+    branches:
+      - feat/hugegraph-store-backend
+    paths:
+      - ".hugegraph-factory-fix/ready"
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/hugegraph-store-backend
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Apply factory and configuration integration
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text(encoding="utf-8")
+              if old not in text:
+                  raise SystemExit(f"expected fragment not found in {path}: {old!r}")
+              target.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          replace(
+              "semantica/graph_store/graph_store.py",
+              'supporting Neo4j and FalkorDB backends.\n',
+              'supporting Neo4j, HugeGraph, FalkorDB, Neptune, and AGE backends.\n',
+          )
+          replace(
+              "semantica/graph_store/graph_store.py",
+              '            backend: Backend type ("neo4j", "falkordb")\n',
+              '            backend: Backend type, including "neo4j" or "hugegraph"\n',
+          )
+          replace(
+              "semantica/graph_store/graph_store.py",
+              '''        elif self.backend == "falkordb":
+''',
+              '''        elif self.backend in {"hugegraph", "apache_hugegraph"}:
+            from .hugegraph_store import HugeGraphStore
+
+            hugegraph_config = graph_store_config.get_hugegraph_config()
+            hugegraph_config.update(self.config)
+            self._store_backend = HugeGraphStore(**hugegraph_config)
+
+        elif self.backend == "falkordb":
+''',
+          )
+
+          replace(
+              "semantica/graph_store/config.py",
+              '''            "GRAPH_STORE_NEO4J_ENCRYPTED": "neo4j_encrypted",
+            # FalkorDB settings
+''',
+              '''            "GRAPH_STORE_NEO4J_ENCRYPTED": "neo4j_encrypted",
+            # HugeGraph settings
+            "GRAPH_STORE_HUGEGRAPH_URI": "hugegraph_uri",
+            "GRAPH_STORE_HUGEGRAPH_GRAPH": "hugegraph_graph",
+            "GRAPH_STORE_HUGEGRAPH_GRAPHSPACE": "hugegraph_graphspace",
+            "GRAPH_STORE_HUGEGRAPH_USER": "hugegraph_user",
+            "GRAPH_STORE_HUGEGRAPH_PASSWORD": "hugegraph_password",
+            "GRAPH_STORE_HUGEGRAPH_TIMEOUT": "hugegraph_timeout",
+            "GRAPH_STORE_HUGEGRAPH_READ_ONLY": "hugegraph_read_only",
+            # FalkorDB settings
+''',
+          )
+          replace(
+              "semantica/graph_store/config.py",
+              '''                    "max_retries",
+                    "falkordb_port",
+''',
+              '''                    "max_retries",
+                    "hugegraph_timeout",
+                    "falkordb_port",
+''',
+          )
+          replace(
+              "semantica/graph_store/config.py",
+              '''                    "neo4j_encrypted",
+                    "neptune_iam_auth",
+''',
+              '''                    "neo4j_encrypted",
+                    "hugegraph_read_only",
+                    "neptune_iam_auth",
+''',
+          )
+          replace(
+              "semantica/graph_store/config.py",
+              '''            "neo4j_encrypted": False,
+            # FalkorDB defaults
+''',
+              '''            "neo4j_encrypted": False,
+            # HugeGraph defaults
+            "hugegraph_uri": "http://localhost:8080",
+            "hugegraph_graph": "hugegraph",
+            "hugegraph_graphspace": None,
+            "hugegraph_user": "admin",
+            "hugegraph_password": "hugegraph",
+            "hugegraph_timeout": 30,
+            "hugegraph_read_only": False,
+            # FalkorDB defaults
+''',
+          )
+          replace(
+              "semantica/graph_store/config.py",
+              '''    def get_falkordb_config(self) -> Dict[str, Any]:
+''',
+              '''    def get_hugegraph_config(self) -> Dict[str, Any]:
+        """Get Apache HugeGraph-specific configuration."""
+        return {
+            "uri": self._config.get("hugegraph_uri"),
+            "graph": self._config.get("hugegraph_graph"),
+            "graphspace": self._config.get("hugegraph_graphspace"),
+            "user": self._config.get("hugegraph_user"),
+            "password": self._config.get("hugegraph_password"),
+            "timeout": self._config.get("hugegraph_timeout"),
+            "read_only": self._config.get("hugegraph_read_only"),
+        }
+
+    def get_falkordb_config(self) -> Dict[str, Any]:
+''',
+          )
+
+          replace(
+              "semantica/graph_store/__init__.py",
+              '''from .graph_store import (
+''',
+              '''from .hugegraph_store import HUGEGRAPH_AVAILABLE, HugeGraphStore
+from .graph_store import (
+''',
+          )
+          replace(
+              "semantica/graph_store/__init__.py",
+              '''    # Neo4j
+''',
+              '''    # Apache HugeGraph
+    "HugeGraphStore",
+    "HUGEGRAPH_AVAILABLE",
+    # Neo4j
+''',
+          )
+
+          test_path = Path("tests/graph_store/test_hugegraph_store.py")
+          tests = test_path.read_text(encoding="utf-8")
+          tests = tests.replace(
+              "from semantica.graph_store.hugegraph_store import HugeGraphStore\n",
+              "from semantica.graph_store.graph_store import GraphStore\n"
+              "from semantica.graph_store.hugegraph_store import HugeGraphStore\n",
+              1,
+          )
+          tests += '''
+
+
+def test_graph_store_factory_builds_hugegraph_backend():
+    client = Client()
+    facade = GraphStore(
+        backend="hugegraph",
+        client=client,
+        read_only=True,
+        uri="http://example.invalid:8080",
+        graph="existing_graph",
+    )
+
+    assert isinstance(facade._store_backend, HugeGraphStore)
+    assert facade._store_backend.read_only is True
+    assert facade._store_backend.graph_name == "existing_graph"
+    assert facade.connect() is True
+
+
+def test_graph_store_factory_accepts_apache_hugegraph_alias():
+    facade = GraphStore(backend="apache_hugegraph", client=Client())
+    assert isinstance(facade._store_backend, HugeGraphStore)
+'''
+          test_path.write_text(tests, encoding="utf-8")
+
+          replace(
+              "docs/graph_stores/hugegraph.md",
+              '''from semantica.graph_store.hugegraph_store import HugeGraphStore
+
+store = HugeGraphStore(
+''',
+              '''from semantica.graph_store import GraphStore
+
+store = GraphStore(
+    backend="hugegraph",
+''',
+          )
+          PY
+      - name: Format modified Python
+        run: |
+          python -m pip install black==25.1.0 isort==6.0.1
+          black \
+            semantica/graph_store/graph_store.py \
+            semantica/graph_store/config.py \
+            semantica/graph_store/__init__.py \
+            tests/graph_store/test_hugegraph_store.py
+          isort \
+            semantica/graph_store/graph_store.py \
+            semantica/graph_store/config.py \
+            semantica/graph_store/__init__.py \
+            tests/graph_store/test_hugegraph_store.py
+          python -m compileall -q semantica/graph_store tests/graph_store/test_hugegraph_store.py
+      - name: Commit changes
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add \
+            semantica/graph_store/graph_store.py \
+            semantica/graph_store/config.py \
+            semantica/graph_store/__init__.py \
+            tests/graph_store/test_hugegraph_store.py \
+            docs/graph_stores/hugegraph.md
+          git commit -m "fix(graph-store): register HugeGraph backend factory"
+          git push origin HEAD:feat/hugegraph-store-backend
