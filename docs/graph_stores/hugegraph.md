@@ -124,3 +124,27 @@ multiple directed edges, bounded multi-hop traversal, shortest paths,
 parameterized Gremlin envelopes, native algorithm dispatch, read-only mode, and
 Chinese lexical entry-node matching. A live HugeGraph container remains the
 required integration gate for release certification.
+
+
+## Unified GraphStore factory
+
+Applications that only need Semantica's common graph-store API can construct the
+backend through the public factory:
+
+```python
+from semantica.graph_store import GraphStore
+
+store = GraphStore(
+    backend="hugegraph",
+    uri="https://hugegraph.example.com",
+    graph="hugegraph",
+    user="reader",
+    password="secret",
+    read_only=True,
+)
+```
+
+Install the optional backend with `pip install "semantica[graph-hugegraph]"`.
+Backend-specific entry-node search and native traverser extensions remain on
+`HugeGraphStore`. Credentialed requests require HTTPS unless the target is a
+loopback endpoint.

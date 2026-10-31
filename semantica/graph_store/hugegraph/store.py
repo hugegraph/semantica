@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ipaddress
 from typing import Any, Optional, Tuple, Union
+from urllib.parse import urlparse
 
 from ...utils.exceptions import ProcessingError, ValidationError
 from ...utils.logging import get_logger
@@ -63,10 +65,7 @@ class HugeGraphStore(
         self.config = config
 
         configured_uri = (
-            uri
-            or config.get("url")
-            or config.get("uri")
-            or "http://localhost:8080"
+            uri or config.get("url") or config.get("uri") or "http://localhost:8080"
         )
         self.uri = configured_uri.rstrip("/")
         self.graph_name = graph or config.get("graph") or "hugegraph"
@@ -117,8 +116,27 @@ class HugeGraphStore(
         seconds = float(self.timeout)
         return (min(1.0, seconds), seconds)
 
+    def _validated_http_uri(self) -> str:
+        """Validate scheme and protect Basic credentials on remote endpoints."""
+        parsed = urlparse(self.uri)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValidationError("HugeGraph URI must be an absolute http or https URL")
+        hostname = parsed.hostname
+        is_loopback = hostname == "localhost"
+        try:
+            is_loopback = is_loopback or ipaddress.ip_address(hostname).is_loopback
+        except ValueError:
+            pass
+        if parsed.scheme == "http" and self.user and not is_loopback:
+            raise ValidationError(
+                "Refusing to send HugeGraph Basic credentials over remote HTTP; "
+                "use HTTPS or a loopback endpoint"
+            )
+        return self.uri
+
     def connect(self, **options: Any) -> bool:
         if self._client is None:
+            self._validated_http_uri()
             if not HUGEGRAPH_AVAILABLE or PyHugeClient is None:
                 raise ProcessingError(
                     "HugeGraph support requires the optional "
@@ -152,6 +170,9 @@ class HugeGraphStore(
         return True
 
     def close(self) -> None:
+        """Close only a client created by this store instance."""
+        if not self._owns_client:
+            return
         if self._client is not None and hasattr(self._client, "close"):
             try:
                 self._client.close()
@@ -160,9 +181,8 @@ class HugeGraphStore(
                     "Failed to close HugeGraph client cleanly: %s",
                     exc,
                 )
-        if self._owns_client:
-            self._client = None
-            self._owns_client = False
+        self._client = None
+        self._owns_client = False
 
     def _client_instance(self) -> Any:
         if self._client is None:
