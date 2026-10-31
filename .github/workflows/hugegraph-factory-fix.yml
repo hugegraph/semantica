@@ -1,4 +1,4 @@
-name: Fix HugeGraph backend factory integration
+name: Finalize HugeGraph backend integration
 
 on:
   push:
@@ -11,41 +11,44 @@ permissions:
   contents: write
 
 jobs:
-  fix:
+  finalize:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: feat/hugegraph-store-backend
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - name: Apply factory and configuration integration
+      - name: Apply reviewed integration fixes
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
 
-          def replace(path: str, old: str, new: str) -> None:
+
+          def replace_once(path: str, old: str, new: str) -> None:
               target = Path(path)
               text = target.read_text(encoding="utf-8")
               if old not in text:
                   raise SystemExit(f"expected fragment not found in {path}: {old!r}")
               target.write_text(text.replace(old, new, 1), encoding="utf-8")
 
-          replace(
+
+          # Register HugeGraph in the public GraphStore factory.
+          replace_once(
               "semantica/graph_store/graph_store.py",
-              'supporting Neo4j and FalkorDB backends.\n',
-              'supporting Neo4j, HugeGraph, FalkorDB, Neptune, and AGE backends.\n',
+              "    supporting Neo4j and FalkorDB backends.\n",
+              "    supporting Neo4j, HugeGraph, FalkorDB, Neptune, and AGE backends.\n",
           )
-          replace(
+          replace_once(
               "semantica/graph_store/graph_store.py",
               '            backend: Backend type ("neo4j", "falkordb")\n',
               '            backend: Backend type, including "neo4j" or "hugegraph"\n',
           )
-          replace(
+          replace_once(
               "semantica/graph_store/graph_store.py",
               '''        elif self.backend == "falkordb":
 ''',
@@ -60,7 +63,8 @@ jobs:
 ''',
           )
 
-          replace(
+          # Add environment/default configuration for the backend.
+          replace_once(
               "semantica/graph_store/config.py",
               '''            "GRAPH_STORE_NEO4J_ENCRYPTED": "neo4j_encrypted",
             # FalkorDB settings
@@ -77,7 +81,7 @@ jobs:
             # FalkorDB settings
 ''',
           )
-          replace(
+          replace_once(
               "semantica/graph_store/config.py",
               '''                    "max_retries",
                     "falkordb_port",
@@ -87,7 +91,7 @@ jobs:
                     "falkordb_port",
 ''',
           )
-          replace(
+          replace_once(
               "semantica/graph_store/config.py",
               '''                    "neo4j_encrypted",
                     "neptune_iam_auth",
@@ -97,7 +101,7 @@ jobs:
                     "neptune_iam_auth",
 ''',
           )
-          replace(
+          replace_once(
               "semantica/graph_store/config.py",
               '''            "neo4j_encrypted": False,
             # FalkorDB defaults
@@ -114,7 +118,7 @@ jobs:
             # FalkorDB defaults
 ''',
           )
-          replace(
+          replace_once(
               "semantica/graph_store/config.py",
               '''    def get_falkordb_config(self) -> Dict[str, Any]:
 ''',
@@ -134,7 +138,7 @@ jobs:
 ''',
           )
 
-          replace(
+          replace_once(
               "semantica/graph_store/__init__.py",
               '''from .graph_store import (
 ''',
@@ -142,7 +146,7 @@ jobs:
 from .graph_store import (
 ''',
           )
-          replace(
+          replace_once(
               "semantica/graph_store/__init__.py",
               '''    # Neo4j
 ''',
@@ -153,6 +157,278 @@ from .graph_store import (
 ''',
           )
 
+          # Publish an installable optional dependency without bloating core.
+          replace_once(
+              "pyproject.toml",
+              '''graph-neo4j = ["neo4j>=5.0.0"]
+''',
+              '''graph-neo4j = ["neo4j>=5.0.0"]
+graph-hugegraph = ["hugegraph-python>=1.7.1"]
+''',
+          )
+          replace_once(
+              "pyproject.toml",
+              '''  "semantica[graph-neo4j,graph-falkordb,graph-amazon-neptune,graph-apache-age,graph-embeddings]"
+''',
+              '''  "semantica[graph-neo4j,graph-hugegraph,graph-falkordb,graph-amazon-neptune,graph-apache-age,graph-embeddings]"
+''',
+          )
+
+          # Never close a caller-owned shared client.
+          replace_once(
+              "semantica/graph_store/hugegraph/store.py",
+              '''    def close(self) -> None:
+        if self._client is not None and hasattr(self._client, "close"):
+            try:
+                self._client.close()
+            except Exception as exc:
+                self.logger.warning(
+                    "Failed to close HugeGraph client cleanly: %s",
+                    exc,
+                )
+        if self._owns_client:
+            self._client = None
+            self._owns_client = False
+''',
+              '''    def close(self) -> None:
+        """Close only a client created by this store instance."""
+        if not self._owns_client:
+            return
+        if self._client is not None and hasattr(self._client, "close"):
+            try:
+                self._client.close()
+            except Exception as exc:
+                self.logger.warning(
+                    "Failed to close HugeGraph client cleanly: %s",
+                    exc,
+                )
+        self._client = None
+        self._owns_client = False
+''',
+          )
+
+          # Replace mode writes first, then removes only properties omitted from
+          # the replacement. A failed write therefore cannot erase old data.
+          replace_once(
+              "semantica/graph_store/hugegraph/crud.py",
+              '''            else:
+                current = self.get_node(node_id)
+                if current is None:
+                    raise ProcessingError(
+                        f"HugeGraph vertex {node_id!r} was not found"
+                    )
+                old_properties = dict(current.get("properties") or {})
+                if old_properties:
+                    _call(
+                        manager,
+                        ("eliminate_vertex", "eliminateVertex"),
+                        node_id,
+                        old_properties,
+                    )
+                value = (
+                    _call(
+                        manager,
+                        ("append_vertex", "appendVertex"),
+                        node_id,
+                        dict(properties),
+                    )
+                    if properties
+                    else None
+                )
+''',
+              '''            else:
+                current = self.get_node(node_id)
+                if current is None:
+                    raise ProcessingError(
+                        f"HugeGraph vertex {node_id!r} was not found"
+                    )
+                old_properties = dict(current.get("properties") or {})
+                if properties:
+                    _call(
+                        manager,
+                        ("append_vertex", "appendVertex"),
+                        node_id,
+                        dict(properties),
+                    )
+                obsolete = {
+                    key: value
+                    for key, value in old_properties.items()
+                    if key not in properties
+                }
+                if obsolete:
+                    _call(
+                        manager,
+                        ("eliminate_vertex", "eliminateVertex"),
+                        node_id,
+                        obsolete,
+                    )
+                value = self.get_node(node_id)
+''',
+          )
+          replace_once(
+              "semantica/graph_store/hugegraph/crud.py",
+              '''            else:
+                old_properties = dict(current.get("properties") or {})
+                if old_properties:
+                    _call(
+                        manager,
+                        ("eliminate_edge", "eliminateEdge"),
+                        rel_id,
+                        old_properties,
+                    )
+                value = (
+                    _call(
+                        manager,
+                        ("append_edge", "appendEdge"),
+                        rel_id,
+                        dict(properties),
+                    )
+                    if properties
+                    else None
+                )
+''',
+              '''            else:
+                old_properties = dict(current.get("properties") or {})
+                if properties:
+                    _call(
+                        manager,
+                        ("append_edge", "appendEdge"),
+                        rel_id,
+                        dict(properties),
+                    )
+                obsolete = {
+                    key: value
+                    for key, value in old_properties.items()
+                    if key not in properties
+                }
+                if obsolete:
+                    _call(
+                        manager,
+                        ("eliminate_edge", "eliminateEdge"),
+                        rel_id,
+                        obsolete,
+                    )
+                value = self.get_relationship(rel_id)
+''',
+          )
+
+          # Validate the Gremlin endpoint before constructing a credentialed
+          # request, and understand HugeGraph's native {"path": [ids]} shape.
+          replace_once(
+              "semantica/graph_store/hugegraph/query.py",
+              '''import gzip
+import json
+''',
+              '''import gzip
+import ipaddress
+import json
+''',
+          )
+          replace_once(
+              "semantica/graph_store/hugegraph/query.py",
+              '''from urllib.error import HTTPError, URLError
+from urllib.request import ProxyHandler, Request, build_opener
+''',
+              '''from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import ProxyHandler, Request, build_opener
+''',
+          )
+          replace_once(
+              "semantica/graph_store/hugegraph/query.py",
+              '''    ) -> Dict[str, Any]:
+        alias = (
+''',
+              '''    ) -> Dict[str, Any]:
+        parsed_uri = urlparse(self.uri)
+        if parsed_uri.scheme not in {"http", "https"} or not parsed_uri.hostname:
+            raise ValidationError(
+                "HugeGraph URI must be an absolute http or https URL"
+            )
+        hostname = parsed_uri.hostname
+        is_loopback = hostname == "localhost"
+        try:
+            is_loopback = is_loopback or ipaddress.ip_address(hostname).is_loopback
+        except ValueError:
+            pass
+        if parsed_uri.scheme == "http" and self.user and not is_loopback:
+            raise ValidationError(
+                "Refusing to send HugeGraph Basic credentials over remote HTTP; "
+                "use HTTPS or a loopback endpoint"
+            )
+        gremlin_url = f"{self.uri}/gremlin"
+        alias = (
+''',
+          )
+          replace_once(
+              "semantica/graph_store/hugegraph/query.py",
+              '''        request = Request(
+            f"{self.uri}/gremlin",
+''',
+              '''        request = Request(
+            gremlin_url,
+''',
+          )
+          replace_once(
+              "semantica/graph_store/hugegraph/query.py",
+              '''        nested = value.get("path")
+        if isinstance(nested, dict):
+            value = nested
+        raw_nodes = value.get("vertices") or value.get("nodes") or []
+''',
+              '''        nested = value.get("path")
+        if isinstance(nested, dict):
+            value = nested
+        elif isinstance(nested, list):
+            if not nested:
+                return None
+            nodes = [
+                _node_dict(item)
+                if isinstance(item, dict) or hasattr(item, "id")
+                else self.get_node(item)
+                or {"id": item, "labels": [], "properties": {}}
+                for item in nested
+            ]
+            return {
+                "length": max(0, len(nodes) - 1),
+                "nodes": nodes,
+                "relationships": [],
+                "start_node_id": start_node_id,
+                "end_node_id": end_node_id,
+                "native_path_ids": list(nested),
+            }
+        raw_nodes = value.get("vertices") or value.get("nodes") or []
+''',
+          )
+          replace_once(
+              "semantica/graph_store/hugegraph/query.py",
+              '''                return self._normalize_path(
+                    raw,
+                    start_node_id,
+                    end_node_id,
+                )
+''',
+              '''                normalized = self._normalize_path(
+                    raw,
+                    start_node_id,
+                    end_node_id,
+                )
+                if normalized is None:
+                    return None
+                if (
+                    normalized.get("relationships")
+                    or len(normalized.get("nodes", [])) <= 1
+                    or options.get("native_only", False)
+                ):
+                    return normalized
+                self.logger.debug(
+                    "Native HugeGraph path omitted edge records; using bounded "
+                    "REST traversal to preserve relationship evidence"
+                )
+''',
+          )
+
+          # Public tests for factory wiring and all four reviewed failure modes.
           test_path = Path("tests/graph_store/test_hugegraph_store.py")
           tests = test_path.read_text(encoding="utf-8")
           tests = tests.replace(
@@ -161,7 +437,55 @@ from .graph_store import (
               "from semantica.graph_store.hugegraph_store import HugeGraphStore\n",
               1,
           )
-          tests += '''
+          tests = tests.replace(
+              "from semantica.utils.exceptions import ValidationError\n",
+              "from semantica.utils.exceptions import ProcessingError, ValidationError\n",
+              1,
+          )
+          if "test_graph_store_factory_builds_hugegraph_backend" not in tests:
+              tests += r'''
+
+
+class CloseTrackingClient(Client):
+    def __init__(self):
+        super().__init__()
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class FailingReplacementGraphManager(GraphManager):
+    def __init__(self):
+        super().__init__()
+        self.fail_vertex_append = False
+        self.fail_edge_append = False
+        self.vertex_eliminate_calls = 0
+        self.edge_eliminate_calls = 0
+
+    def appendVertex(self, vertex_id, properties):
+        if self.fail_vertex_append:
+            raise RuntimeError("simulated vertex write failure")
+        return super().appendVertex(vertex_id, properties)
+
+    def eliminateVertex(self, vertex_id, properties):
+        self.vertex_eliminate_calls += 1
+        return super().eliminateVertex(vertex_id, properties)
+
+    def appendEdge(self, edge_id, properties):
+        if self.fail_edge_append:
+            raise RuntimeError("simulated edge write failure")
+        return super().appendEdge(edge_id, properties)
+
+    def eliminateEdge(self, edge_id, properties):
+        self.edge_eliminate_calls += 1
+        return super().eliminateEdge(edge_id, properties)
+
+
+class PathIdTraverser(TraverserManager):
+    def shortest_path(self, source_id, target_id, max_depth):
+        self.calls.append(("shortest_path", source_id, target_id, max_depth))
+        return {"path": [source_id, target_id]}
 
 
 def test_graph_store_factory_builds_hugegraph_backend():
@@ -170,7 +494,7 @@ def test_graph_store_factory_builds_hugegraph_backend():
         backend="hugegraph",
         client=client,
         read_only=True,
-        uri="http://example.invalid:8080",
+        uri="http://127.0.0.1:8080",
         graph="existing_graph",
     )
 
@@ -183,45 +507,185 @@ def test_graph_store_factory_builds_hugegraph_backend():
 def test_graph_store_factory_accepts_apache_hugegraph_alias():
     facade = GraphStore(backend="apache_hugegraph", client=Client())
     assert isinstance(facade._store_backend, HugeGraphStore)
+
+
+def test_close_keeps_injected_client_open():
+    client = CloseTrackingClient()
+    HugeGraphStore(client=client).close()
+    assert client.closed is False
+
+
+def test_replace_write_failure_does_not_delete_existing_properties():
+    client = Client()
+    graph = FailingReplacementGraphManager()
+    client.graph_manager = graph
+    client.traverser_manager = TraverserManager(graph)
+    subject = HugeGraphStore(client=client)
+    vertex = subject.create_node(["Actor"], {"name": "Alice", "title": "Analyst"})
+    other = subject.create_node(["Actor"], {"name": "Bob"})
+    edge = subject.create_relationship(
+        vertex["id"], other["id"], "KNOWS", {"source": "s1", "quote": "q1"}
+    )
+
+    graph.fail_vertex_append = True
+    with pytest.raises(ProcessingError, match="simulated vertex write failure"):
+        subject.update_node(vertex["id"], {"name": "Alicia"}, merge=False)
+    assert graph.vertex_eliminate_calls == 0
+    assert subject.get_node(vertex["id"])["properties"] == {
+        "name": "Alice",
+        "title": "Analyst",
+    }
+
+    graph.fail_edge_append = True
+    with pytest.raises(ProcessingError, match="simulated edge write failure"):
+        subject.update_relationship(edge["id"], {"source": "s2"}, merge=False)
+    assert graph.edge_eliminate_calls == 0
+    assert subject.get_relationship(edge["id"])["properties"] == {
+        "source": "s1",
+        "quote": "q1",
+    }
+
+
+def test_native_path_id_response_falls_back_to_relationship_evidence():
+    client = Client()
+    client.traverser_manager = PathIdTraverser(client.graph_manager)
+    subject = HugeGraphStore(client=client)
+    source = subject.create_node(["Actor"], {"name": "A"})
+    target = subject.create_node(["Actor"], {"name": "B"})
+    edge = subject.create_relationship(source["id"], target["id"], "KNOWS")
+
+    path = subject.shortest_path(source["id"], target["id"], max_depth=2)
+
+    assert [node["id"] for node in path["nodes"]] == [source["id"], target["id"]]
+    assert [relationship["id"] for relationship in path["relationships"]] == [edge["id"]]
+
+
+def test_gremlin_rejects_unsupported_scheme_and_remote_plaintext_credentials():
+    unsupported = HugeGraphStore(uri="ftp://example.com", client=Client())
+    with pytest.raises(ValidationError, match="http or https"):
+        unsupported._http_gremlin("g.V().count()")
+
+    remote_http = HugeGraphStore(
+        uri="http://example.com:8080",
+        user="admin",
+        password="secret",
+        client=Client(),
+    )
+    with pytest.raises(ValidationError, match="remote HTTP"):
+        remote_http._http_gremlin("g.V().count()")
 '''
           test_path.write_text(tests, encoding="utf-8")
 
-          replace(
-              "docs/graph_stores/hugegraph.md",
-              '''from semantica.graph_store.hugegraph_store import HugeGraphStore
+          docs = Path("docs/graph_stores/hugegraph.md")
+          docs_text = docs.read_text(encoding="utf-8")
+          if "## Unified GraphStore factory" not in docs_text:
+              docs_text += '''
 
-store = HugeGraphStore(
-''',
-              '''from semantica.graph_store import GraphStore
+## Unified GraphStore factory
+
+Applications that only need Semantica's common graph-store API can construct the
+backend through the public factory:
+
+```python
+from semantica.graph_store import GraphStore
 
 store = GraphStore(
     backend="hugegraph",
+    uri="https://hugegraph.example.com",
+    graph="hugegraph",
+    user="reader",
+    password="secret",
+    read_only=True,
+)
+```
+
+Install the optional backend with `pip install "semantica[graph-hugegraph]"`.
+Backend-specific entry-node search and native traverser extensions remain on
+`HugeGraphStore`. Credentialed Gremlin requests require HTTPS unless the target
+is a loopback endpoint.
+'''
+              docs.write_text(docs_text, encoding="utf-8")
+
+          # Add a permanent, pin-compliant focused CI gate for both stacked PRs.
+          Path(".github/workflows/hugegraph-backend.yml").write_text(
+              '''name: HugeGraph backend
+
+on:
+  pull_request:
+    branches:
+      - master
+      - feat/hugegraph-store-backend
+    paths:
+      - "semantica/graph_store/**"
+      - "semantica/context/hugegraph_context.py"
+      - "tests/graph_store/test_hugegraph_store.py"
+      - "tests/context/test_hugegraph_context.py"
+      - "pyproject.toml"
+      - "docs/graph_stores/hugegraph.md"
+      - ".github/workflows/hugegraph-backend.yml"
+  push:
+    branches:
+      - feat/hugegraph-store-backend
+      - feat/hugegraph-context-retrieval
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install pinned core test environment
+        run: |
+          pip install -r .github/requirements/pep517-build.txt --require-hashes
+          pip install --no-deps --no-build-isolation -e .
+          pip install -r .github/requirements/base-deps.txt --require-hashes
+          pip install -r .github/requirements/pytest-tool.txt --require-hashes
+      - name: Verify HugeGraph backend contracts
+        run: |
+          python -m compileall -q semantica/graph_store tests/graph_store/test_hugegraph_store.py
+          python -m pytest -q tests/graph_store/test_hugegraph_store.py
+          if [ -f tests/context/test_hugegraph_context.py ]; then
+            python -m compileall -q semantica/context/hugegraph_context.py tests/context/test_hugegraph_context.py
+            python -m pytest -q tests/context/test_hugegraph_context.py
+          fi
 ''',
+              encoding="utf-8",
           )
+
+          # Remove the one-shot bootstrap from the final PR diff.
+          Path(".github/workflows/hugegraph-factory-fix.yml").unlink()
+          Path(".hugegraph-factory-fix/ready").unlink()
           PY
-      - name: Format modified Python
+      - name: Format and validate
         run: |
           python -m pip install black==25.1.0 isort==6.0.1
           black \
             semantica/graph_store/graph_store.py \
             semantica/graph_store/config.py \
             semantica/graph_store/__init__.py \
+            semantica/graph_store/hugegraph \
             tests/graph_store/test_hugegraph_store.py
           isort \
             semantica/graph_store/graph_store.py \
             semantica/graph_store/config.py \
             semantica/graph_store/__init__.py \
+            semantica/graph_store/hugegraph \
             tests/graph_store/test_hugegraph_store.py
+          pip install -r .github/requirements/pep517-build.txt --require-hashes
+          pip install --no-deps --no-build-isolation -e .
+          pip install -r .github/requirements/base-deps.txt --require-hashes
+          pip install -r .github/requirements/pytest-tool.txt --require-hashes
           python -m compileall -q semantica/graph_store tests/graph_store/test_hugegraph_store.py
-      - name: Commit changes
+          python -m pytest -q tests/graph_store/test_hugegraph_store.py
+      - name: Commit finalized backend
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add \
-            semantica/graph_store/graph_store.py \
-            semantica/graph_store/config.py \
-            semantica/graph_store/__init__.py \
-            tests/graph_store/test_hugegraph_store.py \
-            docs/graph_stores/hugegraph.md
-          git commit -m "fix(graph-store): register HugeGraph backend factory"
+          git add -A
+          git commit -m "fix(graph-store): finalize HugeGraph backend integration"
           git push origin HEAD:feat/hugegraph-store-backend
