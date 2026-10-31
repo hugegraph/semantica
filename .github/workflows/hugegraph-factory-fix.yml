@@ -45,10 +45,15 @@ jobs:
           pip install -r .github/requirements/pytest-tool.txt --require-hashes
           python -m compileall -q semantica/graph_store tests/graph_store/test_hugegraph_store.py
           python -m pytest -q tests/graph_store/test_hugegraph_store.py
-      - name: Commit finalized backend
+      - name: Commit finalized backend source
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          # Actions tokens may not modify workflow files. Restore the bootstrap
+          # workflow and omit the permanent workflow; the authenticated GitHub
+          # connector installs the latter after this source commit succeeds.
+          git checkout HEAD -- .github/workflows/hugegraph-factory-fix.yml
+          rm -f .github/workflows/hugegraph-backend.yml
           git add -A
           git commit -m "fix(graph-store): finalize HugeGraph backend integration"
           git push origin HEAD:feat/hugegraph-store-backend
